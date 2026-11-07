@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 from typing import Any
+from unittest.mock import patch
 
 from freezegun.api import FrozenDateTimeFactory
 from homeassistant.core import HomeAssistant
@@ -263,3 +265,176 @@ async def test_waits_for_zha(
     await _advance(hass, freezer, 30)
     assert notify_calls == []
     assert hass.states.get(SENSOR).attributes["pending"] == []
+
+
+PN_MODULE = "custom_components.zigbee_availability.monitor.persistent_notification"
+
+
+async def test_timer_starts_when_last_entity_goes_unavailable(
+    hass: HomeAssistant,
+    zha_entry: MockConfigEntry,
+    freezer: FrozenDateTimeFactory,
+    notify_calls,
+) -> None:
+    """A long-dead entity doesn't shorten the timeout once the rest follow."""
+    _, entities = _add_device(hass, zha_entry, "00:71", "Thermostat")
+    await _setup(hass)
+
+    _set(hass, entities[:1], "unavailable")
+    await _advance(hass, freezer, 24 * 60)
+    _set(hass, entities[1:], "unavailable")
+    await _advance(hass, freezer, 1)
+    assert notify_calls == []
+
+    await _advance(hass, freezer, 15)
+    assert len(notify_calls) == 1
+
+
+async def test_unknown_is_not_a_recovery(
+    hass: HomeAssistant,
+    zha_entry: MockConfigEntry,
+    freezer: FrozenDateTimeFactory,
+    notify_calls,
+) -> None:
+    """unknown/unavailable mixes keep the outage; a real value ends it."""
+    _, entities = _add_device(hass, zha_entry, "00:72", "Plug")
+    up_events = async_capture_events(hass, EVENT_DEVICE_AVAILABLE)
+    await _setup(hass)
+
+    _set(hass, entities, "unavailable")
+    await _advance(hass, freezer, 16)
+    assert len(notify_calls) == 1
+
+    _set(hass, entities[:1], "unknown")
+    await _advance(hass, freezer, 5)
+    assert len(notify_calls) == 1
+    assert up_events == []
+    assert hass.states.get(SENSOR).state == "1"
+
+    _set(hass, entities[:1], "21")
+    await _advance(hass, freezer, 1)
+    assert len(notify_calls) == 2
+    assert len(up_events) == 1
+
+
+async def test_missing_state_defers_evaluation(
+    hass: HomeAssistant,
+    zha_entry: MockConfigEntry,
+    freezer: FrozenDateTimeFactory,
+    notify_calls,
+) -> None:
+    """A device is not judged while one of its entities has no state yet."""
+    _, entities = _add_device(hass, zha_entry, "00:73", "Sensor")
+    await _setup(hass)
+
+    hass.states.async_remove(entities[1])
+    _set(hass, entities[:1], "unavailable")
+    await _advance(hass, freezer, 30)
+    assert notify_calls == []
+    assert hass.states.get(SENSOR).attributes["pending"] == []
+
+
+async def test_persistent_notification_recreated_after_restart(
+    hass: HomeAssistant,
+    zha_entry: MockConfigEntry,
+    freezer: FrozenDateTimeFactory,
+    notify_calls,
+) -> None:
+    """A reload recreates the notification (they are lost on restart)."""
+    _, entities = _add_device(hass, zha_entry, "00:74", "Garage plug")
+    entry = await _setup(hass)
+    _set(hass, entities, "unavailable")
+    await _advance(hass, freezer, 16)
+
+    with patch(f"{PN_MODULE}.async_create") as create:
+        assert await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+    create.assert_called_once()
+    assert "Garage plug" in create.call_args.args[1]
+
+
+async def test_persistent_notification_dismissed_when_device_excluded(
+    hass: HomeAssistant,
+    zha_entry: MockConfigEntry,
+    freezer: FrozenDateTimeFactory,
+    notify_calls,
+) -> None:
+    """Excluding the last offline device removes the notification."""
+    device, entities = _add_device(hass, zha_entry, "00:75", "Plug")
+    entry = await _setup(hass)
+    _set(hass, entities, "unavailable")
+    await _advance(hass, freezer, 16)
+
+    with patch(f"{PN_MODULE}.async_dismiss") as dismiss:
+        hass.config_entries.async_update_entry(
+            entry, options={**OPTIONS, CONF_EXCLUDE_DEVICES: [device.id]}
+        )
+        await hass.async_block_till_done()
+    dismiss.assert_called()
+    assert hass.states.get(SENSOR).state == "0"
+
+
+async def test_persistent_notification_dismissed_when_disabled(
+    hass: HomeAssistant,
+    zha_entry: MockConfigEntry,
+    freezer: FrozenDateTimeFactory,
+    notify_calls,
+) -> None:
+    """Turning the option off removes an existing notification."""
+    _, entities = _add_device(hass, zha_entry, "00:76", "Plug")
+    entry = await _setup(hass)
+    _set(hass, entities, "unavailable")
+    await _advance(hass, freezer, 16)
+
+    with patch(f"{PN_MODULE}.async_dismiss") as dismiss:
+        hass.config_entries.async_update_entry(
+            entry, options={**OPTIONS, CONF_PERSISTENT_NOTIFICATION: False}
+        )
+        await hass.async_block_till_done()
+    dismiss.assert_called()
+    assert hass.states.get(SENSOR).state == "1"
+
+
+async def test_stop_waits_for_running_check(
+    hass: HomeAssistant, zha_entry: MockConfigEntry, freezer: FrozenDateTimeFactory
+) -> None:
+    """Unload waits for an in-flight check's save before returning."""
+    async_mock_service(hass, "notify", "mobile_app_phone")
+    _, entities = _add_device(hass, zha_entry, "00:77", "Plug")
+    entry = await _setup(hass)
+    monitor = entry.runtime_data
+
+    gate = asyncio.Event()
+    original_save = monitor._store.async_save
+
+    async def slow_save(data):
+        await gate.wait()
+        await original_save(data)
+
+    monitor._store.async_save = slow_save
+    _set(hass, entities, "unavailable")
+    check = hass.async_create_task(monitor.async_check())
+    await asyncio.sleep(0)
+    stop = hass.async_create_task(monitor.async_stop())
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert not stop.done()
+
+    gate.set()
+    await check
+    await stop
+    # A check after stop does nothing.
+    await monitor.async_check()
+
+
+async def test_failed_target_is_reported(
+    hass: HomeAssistant, zha_entry: MockConfigEntry, freezer: FrozenDateTimeFactory
+) -> None:
+    """A missing notify target is returned as failed; the others still get it."""
+    calls = async_mock_service(hass, "notify", "mobile_app_phone")
+    entry = await _setup(
+        hass, {**OPTIONS, CONF_NOTIFY_TARGETS: ["notify.gone", "notify.mobile_app_phone"]}
+    )
+    failures = await entry.runtime_data._async_send("t", "m")
+    assert failures == {"notify.gone": "does not exist"}
+    assert len(calls) == 1

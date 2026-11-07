@@ -11,7 +11,9 @@ or by putting a label on them.
 
 - Checks every ZHA device every 30 seconds. A device counts as **unavailable** when
   *all* of its enabled ZHA entities are `unavailable`, so one flaky entity doesn't trigger
-  an alert.
+  an alert. The timeout starts when the *last* entity goes unavailable. A device counts as
+  back only once an entity reports a real value; `unknown` doesn't count, so startup
+  doesn't produce false "back online" messages.
 - When a device has been unavailable longer than your **timeout**, it sends **one**
   message. Devices that cross the timeout together are grouped into a single message.
 - Optionally sends a **"back online"** message with how long the device was gone.
@@ -59,6 +61,24 @@ ZHA only marks a device unavailable after it hasn't heard from it for a while. B
 that's about **2 hours for mains-powered** and **6 hours for battery** devices. You can
 change these in the ZHA integration's options (*Configure → Global options*). Your
 timeout here starts counting once ZHA has marked the device unavailable.
+
+Suggested settings:
+
+| | ZHA setting | Notes |
+|---|---|---|
+| Mains-powered | 600–1800 s | ZHA actively checks these, so a short value is safe. |
+| Battery | 10800–21600 s (default) | Many sensors only check in every 1–4 h. Lower values cause false alarms. |
+
+With mains at 900 s in ZHA and a 5-minute timeout here, you hear about a dead plug after
+about 20 minutes.
+
+## Test notification
+
+The integration's device page has a **Send test notification** button. It sends a test
+message to every notify target and shows an error naming any target that failed, such
+as a renamed phone. Press it after setup and whenever you change targets. You can also
+call `button.press` on `button.zigbee_availability_send_test_notification` from an
+automation.
 
 ## Sensor
 

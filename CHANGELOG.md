@@ -20,3 +20,16 @@ All notable changes to this project are documented here. The format follows
 - `zigbee_availability_device_unavailable` and `zigbee_availability_device_available` events.
 - Tracking survives restarts: no repeated alerts and no reset timers.
 - Setup and options in the UI.
+- **Send test notification** button that checks every notify target and reports any
+  that fail.
+
+### Fixed (found in pre-release review, see [BUGS.md](BUGS.md))
+
+- The timeout now starts when the *last* entity of a device goes unavailable.
+- `unknown` states, or entities without a state yet, no longer count as recovery or
+  trigger alerts (no false "back online" messages during startup).
+- Unload waits for a running check, so an options change can't load stale state or
+  duplicate an alert.
+- The persistent notification is kept in sync after restarts, exclusions and option
+  changes.
+- Failed notify targets are logged as errors with the reason.

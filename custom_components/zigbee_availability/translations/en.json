@@ -51,6 +51,11 @@
     }
   },
   "entity": {
+    "button": {
+      "test_notification": {
+        "name": "Send test notification"
+      }
+    },
     "sensor": {
       "unavailable_devices": {
         "name": "Unavailable devices"

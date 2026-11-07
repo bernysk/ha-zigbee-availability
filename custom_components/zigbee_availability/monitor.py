@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from enum import Enum
 import logging
 from typing import Any
 
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
-from homeassistant.const import STATE_UNAVAILABLE
+from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import CALLBACK_TYPE, CoreState, HomeAssistant, State, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_registry as er
@@ -58,6 +60,36 @@ class TrackedDevice:
         }
 
 
+class _Status(Enum):
+    ONLINE = "online"
+    OFFLINE = "offline"
+    INDETERMINATE = "indeterminate"
+
+
+_UNRENDERED = object()
+
+
+def _evaluate(states: list[State | None]) -> tuple[_Status, datetime | None]:
+    """Classify a device from the states of its monitored entities.
+
+    - OFFLINE: every entity has a state and all are ``unavailable``. Also
+      returns when the *last* one became unavailable.
+    - ONLINE: at least one entity has a real value (not unknown/unavailable).
+    - INDETERMINATE: anything else (no entities, missing states, or only
+      unknown/unavailable), which is not evidence in either direction.
+    """
+    present = [state for state in states if state is not None]
+    if any(state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN) for state in present):
+        return _Status.ONLINE, None
+    if (
+        present
+        and len(present) == len(states)
+        and all(state.state == STATE_UNAVAILABLE for state in present)
+    ):
+        return _Status.OFFLINE, max(state.last_changed for state in present)
+    return _Status.INDETERMINATE, None
+
+
 class AvailabilityMonitor:
     """Watches ZHA devices and alerts when one stays unavailable too long.
 
@@ -76,6 +108,12 @@ class AvailabilityMonitor:
         self._tracked: dict[str, TrackedDevice] = {}
         self._listeners: list[CALLBACK_TYPE] = []
         self._unsubs: list[CALLBACK_TYPE] = []
+        # Serializes checks; unload waits on it so a reload never overlaps a save.
+        self._lock = asyncio.Lock()
+        self._stopped = False
+        # Text currently shown as persistent notification. _UNRENDERED forces a
+        # first reconcile, since persistent notifications don't survive restarts.
+        self._notification_text: object = _UNRENDERED
 
     # ------------------------------------------------------------------ setup
 
@@ -95,11 +133,13 @@ class AvailabilityMonitor:
         self._unsubs.append(async_track_time_interval(self.hass, self._async_tick, CHECK_INTERVAL))
         self._unsubs.append(async_at_started(self.hass, self._async_started))
 
-    @callback
-    def async_stop(self) -> None:
-        """Stop the periodic check."""
+    async def async_stop(self) -> None:
+        """Stop checking and wait for a check that is still running."""
+        self._stopped = True
         while self._unsubs:
             self._unsubs.pop()()
+        async with self._lock:
+            pass
 
     async def _async_started(self, _hass: HomeAssistant) -> None:
         await self.async_check()
@@ -155,11 +195,12 @@ class AvailabilityMonitor:
             for entry in self.hass.config_entries.async_entries(ZHA_DOMAIN)
         )
 
-    def _iter_devices(self) -> Iterator[tuple[dr.DeviceEntry, list[State]]]:
-        """Yield monitored ZHA devices with the states of their entities.
+    def _iter_devices(self) -> Iterator[tuple[dr.DeviceEntry, _Status, datetime | None]]:
+        """Yield monitored ZHA devices with their availability status.
 
-        The state list is empty when the device's entities have no state yet
-        (for example during startup); such devices are not evaluated.
+        For an offline device, also yields when its last entity went
+        unavailable (the moment "all entities unavailable" became true).
+        Disabled entities are skipped by ``async_entries_for_device``.
         """
         dev_reg = dr.async_get(self.hass)
         ent_reg = er.async_get(self.hass)
@@ -177,19 +218,24 @@ class AvailabilityMonitor:
             if excluded_labels & device.labels:
                 continue
 
-            states: list[State] = []
-            for entity in er.async_entries_for_device(ent_reg, device.id):
-                if entity.platform != ZHA_DOMAIN or excluded_labels & entity.labels:
-                    continue
-                if (state := self.hass.states.get(entity.entity_id)) is not None:
-                    states.append(state)
-            yield device, states
+            entities = [
+                entity
+                for entity in er.async_entries_for_device(ent_reg, device.id)
+                if entity.platform == ZHA_DOMAIN and not excluded_labels & entity.labels
+            ]
+            states = [self.hass.states.get(entity.entity_id) for entity in entities]
+            yield device, *_evaluate(states)
 
     async def async_check(self) -> None:
         """Evaluate all devices, send alerts and update state."""
-        if self.hass.state is not CoreState.running or not self._zha_loaded():
-            return
+        async with self._lock:
+            if self._stopped:
+                return
+            if self.hass.state is not CoreState.running or not self._zha_loaded():
+                return
+            await self._async_check_locked()
 
+    async def _async_check_locked(self) -> None:
         now = dt_util.utcnow()
         timeout = self.timeout
         went_offline: list[tuple[str, TrackedDevice]] = []
@@ -197,19 +243,19 @@ class AvailabilityMonitor:
         changed = False
         monitored: set[str] = set()
 
-        for device, states in self._iter_devices():
+        for device, status, offline_since in self._iter_devices():
             monitored.add(device.id)
-            if not states:
+            if status is _Status.INDETERMINATE:
+                # Missing states, or only unknown/unavailable: no evidence either
+                # way (typical during startup). Keep whatever we had.
                 continue
 
             name = device.name_by_user or device.name or device.id
             tracked = self._tracked.get(device.id)
 
-            if all(state.state == STATE_UNAVAILABLE for state in states):
+            if status is _Status.OFFLINE:
                 if tracked is None:
-                    tracked = TrackedDevice(
-                        name=name, since=min(state.last_changed for state in states)
-                    )
+                    tracked = TrackedDevice(name=name, since=offline_since or now)
                     self._tracked[device.id] = tracked
                     changed = True
                 elif tracked.name != name:
@@ -230,6 +276,8 @@ class AvailabilityMonitor:
         for device_id in set(self._tracked) - monitored:
             del self._tracked[device_id]
             changed = True
+
+        self._reconcile_persistent_notification()
 
         if not changed:
             return
@@ -259,8 +307,6 @@ class AvailabilityMonitor:
         )
         self._async_notify_listeners()
 
-        if went_offline or came_back:
-            self._update_persistent_notification()
         if went_offline:
             await self._async_send(*self._offline_message(went_offline))
         if came_back and self.options.get(CONF_NOTIFY_RECOVERY, DEFAULT_NOTIFY_RECOVERY):
@@ -311,30 +357,60 @@ class AvailabilityMonitor:
         return title, "\n".join(lines)
 
     @callback
-    def _update_persistent_notification(self) -> None:
-        if not self.options.get(CONF_PERSISTENT_NOTIFICATION, DEFAULT_PERSISTENT_NOTIFICATION):
-            return
-        offline = self.offline_devices
-        if not offline:
-            persistent_notification.async_dismiss(self.hass, PERSISTENT_NOTIFICATION_ID)
-            return
-        lines = [
-            f"- **{tracked.name}**: unavailable since {self._local_time(tracked.since)}"
-            for tracked in sorted(offline.values(), key=lambda t: t.name.lower())
-        ]
-        persistent_notification.async_create(
-            self.hass,
-            "\n".join(lines),
-            title="Unavailable Zigbee devices",
-            notification_id=PERSISTENT_NOTIFICATION_ID,
-        )
+    def _reconcile_persistent_notification(self) -> None:
+        """Make the persistent notification match the current offline list.
 
-    async def _async_send(self, title: str, message: str) -> None:
+        Runs after every check, so it is recreated after a restart, removed when
+        the last offline device is excluded or deleted, and dismissed when the
+        option is turned off.
+        """
+        text: str | None = None
+        offline = self.offline_devices
+        if offline and self.options.get(
+            CONF_PERSISTENT_NOTIFICATION, DEFAULT_PERSISTENT_NOTIFICATION
+        ):
+            text = "\n".join(
+                f"- **{tracked.name}**: unavailable since {self._local_time(tracked.since)}"
+                for tracked in sorted(offline.values(), key=lambda t: t.name.lower())
+            )
+        if text == self._notification_text:
+            return
+        self._notification_text = text
+        if text is None:
+            persistent_notification.async_dismiss(self.hass, PERSISTENT_NOTIFICATION_ID)
+        else:
+            persistent_notification.async_create(
+                self.hass,
+                text,
+                title="Unavailable Zigbee devices",
+                notification_id=PERSISTENT_NOTIFICATION_ID,
+            )
+
+    async def async_send_test(self) -> None:
+        """Send a test message to every notify target; raise if any fails."""
+        targets = self.options.get(CONF_NOTIFY_TARGETS, [])
+        if not targets:
+            raise HomeAssistantError(
+                "No notify targets configured. Add one under Configure on the integration."
+            )
+        failures = await self._async_send(
+            "Zigbee Availability test",
+            "Test notification from Zigbee Availability. Alerts will arrive here.",
+        )
+        if failures:
+            raise HomeAssistantError(
+                "Test notification failed: "
+                + "; ".join(f"{target}: {error}" for target, error in failures.items())
+            )
+
+    async def _async_send(self, title: str, message: str) -> dict[str, str]:
         """Send a message to every configured notify target.
 
         A target is either a notify service (``notify.mobile_app_phone``) or a
-        notify entity, which is sent through ``notify.send_message``.
+        notify entity, which is sent through ``notify.send_message``. Returns
+        the targets that failed, with the reason.
         """
+        failures: dict[str, str] = {}
         for target in self.options.get(CONF_NOTIFY_TARGETS, []):
             domain, _, service = target.partition(".")
             if not service:
@@ -352,6 +428,9 @@ class AvailabilityMonitor:
                         blocking=True,
                     )
                 else:
-                    _LOGGER.warning("Notify target %s does not exist", target)
+                    failures[target] = "does not exist"
             except HomeAssistantError as err:
-                _LOGGER.warning("Sending notification via %s failed: %s", target, err)
+                failures[target] = str(err) or type(err).__name__
+        for target, error in failures.items():
+            _LOGGER.error("Sending notification via %s failed: %s", target, error)
+        return failures
