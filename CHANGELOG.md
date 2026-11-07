@@ -14,6 +14,11 @@ All notable changes to this project are documented here. The format follows
 - A device whose entities are all excluded by label or disabled is no longer stuck in
   the offline list.
 
+### Documentation
+
+- README states that the code is AI-generated (Claude Code, reviewed by Codex) and
+  how it is checked.
+
 ## [0.1.0] - 2026-11-07
 
 ### Added
