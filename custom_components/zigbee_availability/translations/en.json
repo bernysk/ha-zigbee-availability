@@ -59,6 +59,9 @@
     "sensor": {
       "unavailable_devices": {
         "name": "Unavailable devices"
+      },
+      "unavailable_device_names": {
+        "name": "Unavailable device names"
       }
     }
   }

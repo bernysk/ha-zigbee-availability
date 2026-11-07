@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [0.1.2] - 2026-11-07
 
+### Added
+
+- `sensor.zigbee_availability_unavailable_device_names` shows the names of offline
+  devices (e.g. `Garage sensor, Kitchen plug`) or `None`. A list longer than HA's
+  255-character state limit is cut at a whole name and ends with `… (+N more)`. The count
+  sensor is unchanged.
+
 ### Fixed
 
 - Minimum Home Assistant version raised to **2025.3.0**. The integration uses

@@ -83,10 +83,15 @@ as a renamed phone. Press it after setup and whenever you change targets. You ca
 call `button.press` on `button.zigbee_availability_send_test_notification` from an
 automation.
 
-## Sensor
+## Sensors
 
-`sensor.zigbee_availability_unavailable_devices`: the number of devices past the
-timeout.
+| Entity | State |
+|---|---|
+| `sensor.zigbee_availability_unavailable_devices` | The **number** of devices past the timeout, e.g. `2`. Numeric, so it graphs and works in "above 0" conditions. |
+| `sensor.zigbee_availability_unavailable_device_names` | Their **names**, e.g. `Garage sensor, Kitchen plug`, or `None` when all are online. |
+
+HA limits a state to 255 characters. A longer list of names is cut at a whole name and
+ends with `… (+N more)`. The full list is in the count sensor's attributes:
 
 | Attribute | Content |
 |---|---|
@@ -94,7 +99,8 @@ timeout.
 | `pending` | Devices unavailable but not yet past the timeout |
 | `timeout_minutes` | The configured timeout |
 
-Example dashboard card:
+The quickest dashboard view is an entities card with both sensors. For names with
+times, use a Markdown card:
 
 ```yaml
 type: markdown
