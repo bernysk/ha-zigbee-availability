@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.2] - 2026-11-07
+
+### Fixed
+
+- Minimum Home Assistant version raised to **2025.3.0**. The integration uses
+  `AddConfigEntryEntitiesCallback`, which first appears in 2025.3, so it failed to load
+  on 2025.1 and 2025.2 even though `hacs.json` claimed support.
+
 ## [0.1.1] - 2026-11-07
 
 ### Fixed (found in Codex re-review, see [BUGS.md](https://github.com/bernysk/ha-zigbee-availability/blob/main/BUGS.md))
