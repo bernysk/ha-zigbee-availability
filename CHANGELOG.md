@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] - 2026-11-07
+
+### Fixed (found in Codex re-review, see [BUGS.md](https://github.com/bernysk/ha-zigbee-availability/blob/main/BUGS.md))
+
+- Alerts that no notify target accepts are retried every 30 seconds for up to 10
+  minutes, with "(delayed)" added to the title. Partial failures are not retried, to
+  avoid duplicates.
+- A device whose entities are all excluded by label or disabled is no longer stuck in
+  the offline list.
+
 ## [0.1.0] - 2026-11-07
 
 ### Added

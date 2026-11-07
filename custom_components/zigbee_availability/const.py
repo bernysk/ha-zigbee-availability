@@ -23,5 +23,7 @@ EVENT_DEVICE_UNAVAILABLE: Final = f"{DOMAIN}_device_unavailable"
 EVENT_DEVICE_AVAILABLE: Final = f"{DOMAIN}_device_available"
 
 CHECK_INTERVAL: Final = timedelta(seconds=30)
+# Retries for an alert no notify target accepted: 20 x 30 s = 10 minutes.
+MAX_DELIVERY_ATTEMPTS: Final = 20
 STORAGE_VERSION: Final = 1
 PERSISTENT_NOTIFICATION_ID: Final = DOMAIN

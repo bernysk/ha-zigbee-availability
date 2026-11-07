@@ -42,8 +42,9 @@ and against Home Assistant 2026.10's source.
 - **Severity:** medium
 - **Problem:** entities without a state were dropped, so a device with one unavailable
   entity and one not-yet-loaded entity counted as fully unavailable.
-- **Fix:** if any monitored entity has no state, the device is indeterminate and isn't
-  evaluated.
+- **Fix:** a device is only judged *offline* when every monitored entity has a state
+  and all of them are `unavailable`. A single real value still counts as online, even if
+  another entity has no state yet, which is consistent with finding 2.
 - **Not valid:** the claim that disabled entities are included.
   `er.async_entries_for_device()` already excludes them by default
   (`include_disabled_entities=False`).
@@ -75,7 +76,9 @@ and against Home Assistant 2026.10's source.
   `test_persistent_notification_dismissed_when_device_excluded`,
   `test_persistent_notification_dismissed_when_disabled`
 
-### 6. A failed notification is treated as delivered. Deferred
+### 6. A failed notification is treated as delivered. Deferred in 0.1.0, fixed in 0.1.1
+
+Codex challenged the deferral in the second review; see below.
 
 - **Severity:** medium
 - **Problem:** `notified` is saved before sending. If every notify target fails, the
@@ -92,3 +95,70 @@ and against Home Assistant 2026.10's source.
   - The sensor, the events and the persistent notification are still updated even when
     sending fails.
 - **Revisit:** if users report lost alerts.
+
+## Codex re-review, 2026-11-07 (after 0.1.0)
+
+Codex was given the 0.1.0 source and this file, and asked to check the fixes and to
+argue against the decisions above.
+
+### Fixes 1 to 5: confirmed
+
+Codex confirmed fixes 2 to 5. For fix 1 it confirmed the new code path and raised R1
+(below) about the existing one.
+
+### Finding 3, "disabled entities are included": Codex accepted the rejection
+
+`er.async_entries_for_device()` excludes disabled entities by default, so no extra filter
+is needed.
+
+### Finding 6 deferral: Codex didn't accept it. Fixed in 0.1.1
+
+- **Codex's argument:** a notify provider that fails temporarily (raises
+  `HomeAssistantError`) loses the alert for good. The test button working at setup time
+  doesn't help then. With the persistent notification turned off, nothing tells the user.
+  Codex also noted that "retrying rarely helps" wasn't backed by evidence. It suggested a
+  bounded retry for the case where *every* target fails, which needs no per-target state.
+- **Verdict:** accepted. The argument holds and the fix is small.
+- **Fix:** if no target accepts an alert, it is retried on every check (30 s) for up to 10
+  minutes, with "(delayed)" added to the title. Partial failures are not retried,
+  because resending would duplicate the message on the targets that worked; the failing
+  targets are logged. The retry queue is in memory only, so a restart during those 10
+  minutes drops it. The sensor and persistent notification still show the device.
+- **Tests:** `test_alert_retried_when_no_target_works`, `test_retry_gives_up`,
+  `test_partial_failure_not_retried`
+
+### R1. A recovery between two checks keeps the old timer. Not needed
+
+- **Codex's scenario:** a device recovers and goes unavailable again *between* two
+  30-second checks, so the next check still sees the old outage. The alert comes too
+  early, or a second outage merges into an alert that was already sent.
+- **Why it can't happen with ZHA** (checked in zha 2.4.3, `DeviceAvailabilityChecker`
+  and `Device._check_available`):
+  1. ZHA marks a device **available** as soon as any message arrives, but marks it
+     **unavailable** only from its availability checker, which runs every **30–45 s**.
+  2. Before marking a device unavailable, ZHA needs `_CHECKIN_GRACE_PERIODS = 2` failed
+     pings, one per checker run. So after a device was last heard from, it takes at
+     least two more checker runs (**at least 60 s**) to go unavailable, *whatever the
+     unavailability timeout is set to*.
+  3. Our check runs every 30 s, so it always sees the device online at least once in
+     between and closes the old outage.
+- **The one exception:** LUMI (Aqara) devices and devices without endpoints skip the
+  pings. They can only flap within 30 s if ZHA's unavailability timeout is set below
+  30 s. Aqara sensors report about every 50–60 minutes, so such a setting would mark them
+  unavailable all the time anyway.
+- **Cost of a fix:** a fix would have to tell a real new outage apart from timestamps
+  reset by a restart, which is exactly what persisting `since` protects. Doing it
+  reliably means listening to every ZHA state change instead of checking every 30 s.
+  That's more code and more risk for a case ZHA's own design prevents.
+- **Revisit:** if ZHA changes its availability logic, or Z2M support is added. Z2M marks
+  devices unavailable on its own schedule.
+
+### R2. An offline device stays listed if all its entities are excluded or disabled. Fixed in 0.1.1
+
+- **Severity:** medium
+- **Problem:** with every entity of an offline device labelled or disabled, the device
+  had no states left. It counted as *indeterminate*, so its old entry stayed in the
+  sensor and the persistent notification forever.
+- **Fix:** a device with no monitored entities left is skipped like an excluded device,
+  so its entry is dropped without a "back online" message.
+- **Test:** `test_device_with_no_monitored_entities_is_forgotten`

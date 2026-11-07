@@ -35,6 +35,7 @@ from .const import (
     DOMAIN,
     EVENT_DEVICE_AVAILABLE,
     EVENT_DEVICE_UNAVAILABLE,
+    MAX_DELIVERY_ATTEMPTS,
     PERSISTENT_NOTIFICATION_ID,
     STORAGE_VERSION,
     ZHA_DOMAIN,
@@ -67,6 +68,15 @@ class _Status(Enum):
 
 
 _UNRENDERED = object()
+
+
+@dataclass
+class _PendingMessage:
+    """An alert that no notify target accepted yet."""
+
+    title: str
+    message: str
+    attempts: int = 0
 
 
 def _evaluate(states: list[State | None]) -> tuple[_Status, datetime | None]:
@@ -114,6 +124,8 @@ class AvailabilityMonitor:
         # Text currently shown as persistent notification. _UNRENDERED forces a
         # first reconcile, since persistent notifications don't survive restarts.
         self._notification_text: object = _UNRENDERED
+        # Alerts that reached no target at all, retried on the next checks.
+        self._pending: list[_PendingMessage] = []
 
     # ------------------------------------------------------------------ setup
 
@@ -223,6 +235,10 @@ class AvailabilityMonitor:
                 for entity in er.async_entries_for_device(ent_reg, device.id)
                 if entity.platform == ZHA_DOMAIN and not excluded_labels & entity.labels
             ]
+            if not entities:
+                # Nothing left to monitor (all entities disabled or excluded):
+                # treat like an excluded device so stale tracking is dropped.
+                continue
             states = [self.hass.states.get(entity.entity_id) for entity in entities]
             yield device, *_evaluate(states)
 
@@ -278,6 +294,7 @@ class AvailabilityMonitor:
             changed = True
 
         self._reconcile_persistent_notification()
+        await self._async_retry_pending()
 
         if not changed:
             return
@@ -308,9 +325,9 @@ class AvailabilityMonitor:
         self._async_notify_listeners()
 
         if went_offline:
-            await self._async_send(*self._offline_message(went_offline))
+            await self._async_deliver(*self._offline_message(went_offline))
         if came_back and self.options.get(CONF_NOTIFY_RECOVERY, DEFAULT_NOTIFY_RECOVERY):
-            await self._async_send(*self._recovery_message(came_back, now))
+            await self._async_deliver(*self._recovery_message(came_back, now))
 
     # ---------------------------------------------------------- notifications
 
@@ -403,7 +420,48 @@ class AvailabilityMonitor:
                 + "; ".join(f"{target}: {error}" for target, error in failures.items())
             )
 
-    async def _async_send(self, title: str, message: str) -> dict[str, str]:
+    async def _async_deliver(self, title: str, message: str) -> None:
+        """Send an alert; queue it for retry if no target accepted it.
+
+        Only total failure is retried. If some targets worked, resending would
+        duplicate the message there, and the failing ones are logged.
+        """
+        targets = self.options.get(CONF_NOTIFY_TARGETS, [])
+        failures = await self._async_send(title, message)
+        if targets and len(failures) == len(targets):
+            _LOGGER.warning(
+                "No notify target accepted '%s'; retrying for up to %s minutes",
+                title,
+                int(CHECK_INTERVAL.total_seconds() * MAX_DELIVERY_ATTEMPTS // 60),
+            )
+            self._pending.append(_PendingMessage(title, message))
+
+    async def _async_retry_pending(self) -> None:
+        """Retry queued alerts once per check, dropping them after the limit."""
+        if not self._pending:
+            return
+        targets = self.options.get(CONF_NOTIFY_TARGETS, [])
+        remaining: list[_PendingMessage] = []
+        for pending in self._pending:
+            pending.attempts += 1
+            failures = await self._async_send(
+                f"{pending.title} (delayed)", pending.message, log_failures=False
+            )
+            if targets and len(failures) == len(targets):
+                if pending.attempts < MAX_DELIVERY_ATTEMPTS:
+                    remaining.append(pending)
+                else:
+                    _LOGGER.error(
+                        "Giving up on '%s' after %s attempts: %s",
+                        pending.title,
+                        pending.attempts,
+                        "; ".join(f"{t}: {e}" for t, e in failures.items()),
+                    )
+        self._pending = remaining
+
+    async def _async_send(
+        self, title: str, message: str, log_failures: bool = True
+    ) -> dict[str, str]:
         """Send a message to every configured notify target.
 
         A target is either a notify service (``notify.mobile_app_phone``) or a
@@ -431,6 +489,7 @@ class AvailabilityMonitor:
                     failures[target] = "does not exist"
             except HomeAssistantError as err:
                 failures[target] = str(err) or type(err).__name__
-        for target, error in failures.items():
-            _LOGGER.error("Sending notification via %s failed: %s", target, error)
+        if log_failures:
+            for target, error in failures.items():
+                _LOGGER.error("Sending notification via %s failed: %s", target, error)
         return failures

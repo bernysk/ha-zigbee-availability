@@ -438,3 +438,72 @@ async def test_failed_target_is_reported(
     failures = await entry.runtime_data._async_send("t", "m")
     assert failures == {"notify.gone": "does not exist"}
     assert len(calls) == 1
+
+
+async def test_device_with_no_monitored_entities_is_forgotten(
+    hass: HomeAssistant,
+    zha_entry: MockConfigEntry,
+    freezer: FrozenDateTimeFactory,
+    notify_calls,
+) -> None:
+    """Labelling every entity of an offline device drops it silently."""
+    ent_reg = er.async_get(hass)
+    _, entities = _add_device(hass, zha_entry, "00:81", "Plug")
+    await _setup(hass)
+    _set(hass, entities, "unavailable")
+    await _advance(hass, freezer, 16)
+    assert hass.states.get(SENSOR).state == "1"
+
+    for entity_id in entities:
+        ent_reg.async_update_entity(entity_id, labels={"ignored"})
+    await _advance(hass, freezer, 1)
+    assert hass.states.get(SENSOR).state == "0"
+    assert len(notify_calls) == 1  # no "back online" message
+
+
+async def test_alert_retried_when_no_target_works(
+    hass: HomeAssistant, zha_entry: MockConfigEntry, freezer: FrozenDateTimeFactory
+) -> None:
+    """If every target fails, the alert is retried and marked delayed."""
+    _, entities = _add_device(hass, zha_entry, "00:82", "Plug")
+    await _setup(hass)  # notify.mobile_app_phone not registered yet
+    _set(hass, entities, "unavailable")
+    await _advance(hass, freezer, 16)
+
+    calls = async_mock_service(hass, "notify", "mobile_app_phone")
+    await _advance(hass, freezer, 0.5)
+    assert len(calls) == 1
+    assert calls[0].data["title"] == "Zigbee device unavailable (delayed)"
+
+    await _advance(hass, freezer, 5)
+    assert len(calls) == 1
+
+
+async def test_retry_gives_up(
+    hass: HomeAssistant, zha_entry: MockConfigEntry, freezer: FrozenDateTimeFactory
+) -> None:
+    """Retries stop after the limit."""
+    _, entities = _add_device(hass, zha_entry, "00:83", "Plug")
+    entry = await _setup(hass)
+    _set(hass, entities, "unavailable")
+    await _advance(hass, freezer, 16)
+    assert len(entry.runtime_data._pending) == 1
+
+    for _ in range(25):
+        await _advance(hass, freezer, 0.5)
+    assert entry.runtime_data._pending == []
+
+
+async def test_partial_failure_not_retried(
+    hass: HomeAssistant, zha_entry: MockConfigEntry, freezer: FrozenDateTimeFactory
+) -> None:
+    """When one target works, nothing is resent (no duplicates)."""
+    calls = async_mock_service(hass, "notify", "mobile_app_phone")
+    _, entities = _add_device(hass, zha_entry, "00:84", "Plug")
+    entry = await _setup(
+        hass, {**OPTIONS, CONF_NOTIFY_TARGETS: ["notify.gone", "notify.mobile_app_phone"]}
+    )
+    _set(hass, entities, "unavailable")
+    await _advance(hass, freezer, 16)
+    assert len(calls) == 1
+    assert entry.runtime_data._pending == []
