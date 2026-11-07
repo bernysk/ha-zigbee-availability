@@ -1,0 +1,60 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Zigbee Availability",
+        "description": "Get notified when a ZHA Zigbee device stays unavailable longer than the timeout. A device counts as unavailable when all of its enabled entities are unavailable.",
+        "data": {
+          "timeout_minutes": "Timeout",
+          "notify_targets": "Notify targets",
+          "notify_recovery": "Notify when a device comes back",
+          "persistent_notification": "Show a persistent notification",
+          "exclude_devices": "Excluded devices",
+          "exclude_labels": "Excluded labels"
+        },
+        "data_description": {
+          "timeout_minutes": "How long a device must be unavailable before you are notified. This is added on top of ZHA's own unavailability timeout.",
+          "notify_targets": "Notify services (for example notify.mobile_app_phone) or notify entities. Leave empty to rely on the persistent notification, the sensor or the events.",
+          "notify_recovery": "Send a message when a device you were alerted about becomes available again.",
+          "persistent_notification": "Keep a notification in Home Assistant listing all currently unavailable devices.",
+          "exclude_devices": "These devices are never monitored.",
+          "exclude_labels": "Devices with any of these labels are not monitored. Entities with these labels are ignored when deciding whether their device is unavailable."
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Zigbee Availability is already configured.",
+      "zha_not_configured": "The ZHA integration is not set up. Zigbee Availability currently supports ZHA only."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Zigbee Availability",
+        "data": {
+          "timeout_minutes": "Timeout",
+          "notify_targets": "Notify targets",
+          "notify_recovery": "Notify when a device comes back",
+          "persistent_notification": "Show a persistent notification",
+          "exclude_devices": "Excluded devices",
+          "exclude_labels": "Excluded labels"
+        },
+        "data_description": {
+          "timeout_minutes": "How long a device must be unavailable before you are notified. This is added on top of ZHA's own unavailability timeout.",
+          "notify_targets": "Notify services (for example notify.mobile_app_phone) or notify entities. Leave empty to rely on the persistent notification, the sensor or the events.",
+          "notify_recovery": "Send a message when a device you were alerted about becomes available again.",
+          "persistent_notification": "Keep a notification in Home Assistant listing all currently unavailable devices.",
+          "exclude_devices": "These devices are never monitored.",
+          "exclude_labels": "Devices with any of these labels are not monitored. Entities with these labels are ignored when deciding whether their device is unavailable."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "unavailable_devices": {
+        "name": "Unavailable devices"
+      }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "domain": "zigbee_availability",
+  "name": "Zigbee Availability",
+  "after_dependencies": ["zha"],
+  "codeowners": ["@bernysk"],
+  "config_flow": true,
+  "documentation": "https://github.com/bernysk/ha-zigbee-availability",
+  "integration_type": "service",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/bernysk/ha-zigbee-availability/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.1.0"
+}
