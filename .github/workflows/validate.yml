@@ -1,8 +1,16 @@
 name: Validate
 
 on:
+  # Docs-only changes can't affect code, manifest or tests. The weekly run and
+  # manual runs still cover everything.
   push:
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
   pull_request:
+    paths-ignore:
+      - "**.md"
+      - "LICENSE"
   schedule:
     - cron: "0 4 * * 1"
   workflow_dispatch:
