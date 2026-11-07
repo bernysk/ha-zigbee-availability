@@ -2,6 +2,7 @@
   "domain": "zigbee_availability",
   "name": "Zigbee Availability",
   "after_dependencies": ["zha"],
+  "categories": ["hubs_protocols.wireless_protocols", "computers_network.monitoring"],
   "codeowners": ["@bernysk"],
   "config_flow": true,
   "documentation": "https://github.com/bernysk/ha-zigbee-availability",
